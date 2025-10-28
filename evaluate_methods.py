@@ -9,7 +9,7 @@ import math
 import os
 import random
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -266,6 +266,52 @@ METHODS: List[MethodConfig] = [
     MethodConfig("PewLSTM w/o Weather", "pew", {"use_periodic": True, "use_weather": False}),
 ]
 
+def _normalize_name(name: str) -> str:
+    return "".join(ch for ch in name.lower() if ch.isalnum())
+
+
+def select_methods(requested: Optional[List[str]]) -> List[MethodConfig]:
+    if not requested:
+        return METHODS
+
+    alias_map: Dict[str, MethodConfig] = {}
+    for method in METHODS:
+        normalized = _normalize_name(method.name)
+        alias_map.setdefault(normalized, method)
+
+    # additional aliases for convenience
+    manual_aliases = {
+        "pewlstmfull": "PewLSTM",
+        "fullpewlstm": "PewLSTM",
+        "simple": "Simple LSTM",
+        "simplelstm": "Simple LSTM",
+        "regression": "Regression (Random Forest)",
+        "rf": "Regression (Random Forest)",
+        "randomforest": "Regression (Random Forest)",
+        "pewlstmwoperiodic": "PewLSTM w/o Periodic",
+        "pewlstmwithoutperiodic": "PewLSTM w/o Periodic",
+        "pewlstmwoweather": "PewLSTM w/o Weather",
+        "pewlstmwithoutweather": "PewLSTM w/o Weather",
+    }
+    for alias, target in manual_aliases.items():
+        alias_key = _normalize_name(alias)
+        target_key = _normalize_name(target)
+        if alias_key not in alias_map and target_key in alias_map:
+            alias_map[alias_key] = alias_map[target_key]
+
+    selected: List[MethodConfig] = []
+    seen = set()
+    for name in requested:
+        key = _normalize_name(name)
+        method = alias_map.get(key)
+        if method is None:
+            raise ValueError(f"Unknown method '{name}'. Available options: {[m.name for m in METHODS]}")
+        if method.name not in seen:
+            selected.append(method)
+            seen.add(method.name)
+
+    return selected
+
 
 def evaluate_method_for_lot(
     config: MethodConfig,
@@ -342,6 +388,7 @@ def evaluate_method_for_lot(
 
 
 def evaluate_all_methods(
+    methods: List[MethodConfig],
     horizons: Iterable[int],
     train_ratio: float,
     epochs: int,
@@ -354,9 +401,10 @@ def evaluate_all_methods(
     set_seed(seed)
     horizons_list = list(horizons)
     results: List[Dict[str, object]] = []
-    progress_bar = tqdm(total=len(METHODS) * len(horizons_list), desc="Evaluating methods", unit="run") if tqdm else None
+    progress_total = len(methods) * len(horizons_list)
+    progress_bar = tqdm(total=progress_total, desc="Evaluating methods", unit="run") if (tqdm and progress_total > 0) else None
     try:
-        for method in METHODS:
+        for method in methods:
             for horizon in horizons_list:
                 horizon_key = str(horizon)
                 method_store = checkpoint.setdefault(method.name, {})
@@ -427,20 +475,38 @@ def evaluate_all_methods(
     return results
 
 
-def plot_results(results: List[Dict[str, object]], output_path: str) -> None:
-    plt.figure(figsize=(8, 5))
-    horizons = sorted(set(int(r["horizon"]) for r in results))
-    for method in METHODS:
-        method_points = [r for r in results if r["method"] == method.name]
-        method_points.sort(key=lambda x: x["horizon"])
+def plot_results(results: List[Dict[str, object]], output_path: str, methods: List[MethodConfig]) -> None:
+    if not results:
+        return
+    horizons = sorted({int(r["horizon"]) for r in results})
+    available_methods = [m for m in methods if any(r["method"] == m.name for r in results)]
+    if not horizons or not available_methods:
+        return
+
+    num_methods = len(available_methods)
+    x = np.arange(len(horizons))
+    width = 0.8 / max(1, num_methods)
+
+    plt.figure(figsize=(10, 6))
+    for idx, method in enumerate(available_methods):
+        method_points = {int(r["horizon"]): r for r in results if r["method"] == method.name}
         if not method_points:
             continue
-        accuracies = [r["metrics"]["accuracy"] for r in method_points]
-        plt.plot(horizons[: len(accuracies)], accuracies, marker="o", label=method.name)
-    plt.xlabel("Forecast Horizon (hours)")
+        accuracies = [method_points[h]["metrics"]["accuracy"] for h in horizons if h in method_points]
+        offsets = x + (idx - (num_methods - 1) / 2) * width
+        plt.bar(offsets[: len(accuracies)], accuracies, width=width, label=method.name)
+
+    abs_values = [r["metrics"]["accuracy"] for r in results]
+    if abs_values:
+        lower = min(abs_values)
+        upper = max(abs_values)
+        margin = max(abs(upper), abs(lower)) * 0.1
+        plt.ylim(lower - margin, upper + margin)
+
+    plt.xticks(x, [f"{h}h" for h in horizons])
+    plt.xlabel("Forecast Horizon")
     plt.ylabel("Accuracy (%)")
-    plt.ylim(0, 100)
-    plt.grid(True, linestyle="--", alpha=0.4)
+    plt.grid(axis="y", linestyle="--", alpha=0.3)
     plt.legend()
     plt.tight_layout()
     plt.savefig(output_path)
@@ -456,7 +522,17 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=str, default="results")
     parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument(
+        "--methods",
+        nargs="*",
+        help="Subset of methods to evaluate (e.g., 'PewLSTM', 'Simple LSTM'). Defaults to all.",
+    )
     args = parser.parse_args()
+
+    selected_methods = select_methods(args.methods)
+    if not selected_methods:
+        print("No methods selected; exiting without evaluation.")
+        return
 
     output_dir = os.path.join(SCRIPT_DIR, args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
@@ -464,6 +540,7 @@ def main() -> None:
     checkpoint = load_checkpoint(checkpoint_path)
 
     results = evaluate_all_methods(
+        methods=selected_methods,
         horizons=[1, 2, 3],
         train_ratio=args.train_ratio,
         epochs=args.epochs,
@@ -479,7 +556,7 @@ def main() -> None:
         json.dump(results, fp, indent=2)
 
     plot_path = os.path.join(output_dir, "accuracy_comparison.png")
-    plot_results(results, plot_path)
+    plot_results(results, plot_path, selected_methods)
 
     sorted_records = sorted(results, key=lambda x: (x["method"], x["horizon"]))
     header = "Method\tHorizon\tAccuracy(%)\tRMSE\tMAE\tMAPE(%)"
