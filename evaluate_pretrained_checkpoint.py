@@ -3,7 +3,7 @@
 
 import json
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -28,7 +28,7 @@ from evaluate_methods import (  # type: ignore
 )
 
 
-def evaluate_pretrained(train_ratio: float = 0.8, seed: int = 42) -> Dict[str, float]:
+def evaluate_pretrained(train_ratio: float = 0.8, seed: int = 42) -> Tuple[Dict[str, float], Dict[str, Dict[str, float]]]:
     set_seed(seed)
     lot_index = 0  # P1
     horizon = 1
@@ -58,15 +58,17 @@ def evaluate_pretrained(train_ratio: float = 0.8, seed: int = 42) -> Dict[str, f
     actual = test_labels_actual.reshape(-1)
 
     metrics = compute_metrics(actual, preds_actual)
-    return dict(metrics)
+    per_lot = {"P1": dict(metrics)}
+    return dict(metrics), per_lot
 
 
-def save_summary(metrics: Dict[str, float]) -> None:
+def save_summary(metrics: Dict[str, float], per_lot: Dict[str, Dict[str, float]]) -> None:
     payload = [
         {
             "method": "PewLSTM (pretrained P1 checkpoint)",
             "horizon": 1,
             "metrics": metrics,
+            "per_lot_metrics": per_lot,
         }
     ]
     with SUMMARY_PATH.open("w", encoding="utf-8") as fp:
@@ -91,8 +93,8 @@ def main() -> None:
     if not CKPT_PATH.exists():
         raise FileNotFoundError(f"Checkpoint not found: {CKPT_PATH}")
 
-    metrics = evaluate_pretrained()
-    save_summary(metrics)
+    metrics, per_lot = evaluate_pretrained()
+    save_summary(metrics, per_lot)
     plot_accuracy_bar(metrics)
 
     print("Pretrained checkpoint evaluation metrics:")
