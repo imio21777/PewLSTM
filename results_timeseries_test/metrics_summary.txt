@@ -1,4 +1,0 @@
-Method	Horizon	Accuracy(%)	RMSE	MAE	MAPE(%)
-Regression (Random Forest)	1	39.38	5.0862	3.4603	24990.47
-Regression (Random Forest)	2	39.23	5.1610	3.4994	24725.55
-Regression (Random Forest)	3	38.71	5.2533	3.5523	25250.70

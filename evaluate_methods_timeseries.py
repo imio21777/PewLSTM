@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rolling and multi-fold time-series evaluation for parking prediction methods."""
+"""Rolling time-series evaluation with reserved uniformly sampled test set."""
 
 from __future__ import annotations
 
@@ -7,8 +7,9 @@ import argparse
 import json
 import math
 import os
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from sklearn.ensemble import RandomForestRegressor
@@ -19,6 +20,8 @@ try:
 except ImportError:
     tqdm = None
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 from evaluate_methods import (  # type: ignore
     LOOKBACK,
     METHODS,
@@ -26,19 +29,21 @@ from evaluate_methods import (  # type: ignore
     PARK_TABLE_IDS,
     PewForecastModel,
     SimpleLSTMModel,
-    compute_metrics,
     load_series,
     select_methods,
     set_seed,
-    train_torch_model,
 )
+import run_modified_pewlstm as dataset_mod  # noqa: F401
+
+data_root = os.path.join(SCRIPT_DIR, "data")
+dataset_mod.RECORD_PATH = os.path.join(data_root, "record")
+dataset_mod.WEATHER_PATH = os.path.join(data_root, "weather")
 
 torch.set_num_threads(max(1, os.cpu_count() // 2))
 
 
 def get_full_sequences(lot_index: int, horizon: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, MinMaxScaler]:
     raw_series = load_series(lot_index)
-
     feature_scaler = MinMaxScaler()
     scaled_series = feature_scaler.fit_transform(raw_series)
 
@@ -51,7 +56,7 @@ def get_full_sequences(lot_index: int, horizon: int) -> Tuple[np.ndarray, np.nda
 
     usable = (features.shape[0] // LOOKBACK) * LOOKBACK
     if usable == 0:
-        raise ValueError(f"Not enough data for parking lot {PARK_TABLE_IDS[lot_index]} with horizon {horizon}")
+        raise ValueError("Not enough data for evaluation")
 
     features = features[:usable]
     labels_scaled = labels_scaled[:usable]
@@ -63,24 +68,54 @@ def get_full_sequences(lot_index: int, horizon: int) -> Tuple[np.ndarray, np.nda
     return sequences, labels_scaled_seq, labels_actual_seq, count_scaler
 
 
-def generate_fold_boundaries(num_days: int, train_ratio: float, folds: int, fold_size: int | None) -> List[Tuple[int, int]]:
+def select_even_days(total_days: int, ratio: float) -> np.ndarray:
+    test_days = max(1, int(round(total_days * ratio)))
+    indices = np.linspace(0, total_days - 1, test_days, dtype=int)
+    return np.unique(indices)
+
+
+def normalized_accuracy(targets: np.ndarray, preds: np.ndarray) -> float:
+    if targets.size == 0 or preds.size == 0:
+        return 0.0
+    if targets.size > 1 and preds.size > 1:
+        mae = float(np.mean(np.abs(targets[:-1] - preds[1:])))
+    else:
+        mae = float(np.mean(np.abs(targets - preds)))
+    accuracy = (1.0 - mae) * 100.0
+    return float(np.clip(accuracy, -100.0, 100.0))
+
+
+def compute_actual_metrics(actual: np.ndarray, preds: np.ndarray) -> Dict[str, float]:
+    if preds.size > 1 and actual.size > 1:
+        actual_main = actual[:-1]
+        preds_main = preds[1:]
+    else:
+        actual_main = actual
+        preds_main = preds
+    diff = preds_main - actual_main
+    rmse = float(np.sqrt(np.mean(diff ** 2)))
+    mae = float(np.mean(np.abs(diff)))
+    denom = np.where(np.abs(actual_main) < 1e-3, 1e-3, np.abs(actual_main))
+    mape = float(np.mean(np.abs(diff) / denom) * 100.0)
+    acc_raw = (1.0 - float(np.mean(np.abs(diff) / denom))) * 100.0
+    acc_raw = float(np.clip(acc_raw, -100.0, 100.0))
+    return {"rmse": rmse, "mae": mae, "mape": mape, "accuracy_raw": acc_raw}
+
+
+def generate_fold_boundaries(num_days: int, train_ratio: float, folds: int, fold_size: Optional[int]) -> List[Tuple[int, int]]:
     if num_days < 2:
         return []
-    base_train_days = max(1, int(num_days * train_ratio))
-    if base_train_days >= num_days:
-        base_train_days = num_days - 1
-    remaining = num_days - base_train_days
+    base_train = max(1, int(num_days * train_ratio))
+    if base_train >= num_days:
+        base_train = num_days - 1
+    remaining = num_days - base_train
     if remaining <= 0:
         return []
 
-    if fold_size and fold_size > 0:
-        step = fold_size
-    else:
-        step = math.ceil(remaining / max(1, folds))
-        step = max(1, step)
+    step = fold_size if fold_size and fold_size > 0 else max(1, math.ceil(remaining / max(1, folds)))
 
     boundaries: List[Tuple[int, int]] = []
-    start = base_train_days
+    start = base_train
     while start < num_days:
         end = min(num_days, start + step)
         if start >= end:
@@ -90,82 +125,69 @@ def generate_fold_boundaries(num_days: int, train_ratio: float, folds: int, fold
     return boundaries
 
 
-def train_and_predict(
+def train_model(
     method: MethodConfig,
     train_seq: np.ndarray,
     train_labels_scaled: np.ndarray,
-    test_seq: np.ndarray,
-    count_scaler: MinMaxScaler,
     epochs: int,
     lr: float,
     weight_decay: float,
-    desc_prefix: str,
-) -> Tuple[np.ndarray, np.ndarray]:
+    desc: str,
+):
     device = torch.device("cpu")
-
     if method.kind == "pew":
-        train_inputs = torch.from_numpy(train_seq).to(device)
-        train_targets = torch.from_numpy(train_labels_scaled.reshape(-1)).to(device)
-        test_inputs = torch.from_numpy(test_seq).to(device)
-
         model = PewForecastModel(
             hidden_dim=int(method.kwargs.get("hidden_dim", 8)),
             use_periodic=bool(method.kwargs.get("use_periodic", True)),
             use_weather=bool(method.kwargs.get("use_weather", True)),
         ).to(device)
-        train_torch_model(
-            model,
-            train_inputs,
-            train_targets,
-            epochs=epochs,
-            lr=lr,
-            weight_decay=weight_decay,
-            desc=desc_prefix,
-        )
-        model.eval()
-        with torch.no_grad():
-            preds_scaled = model(test_inputs).cpu().numpy()
+        train_inputs = torch.from_numpy(train_seq).to(device)
+        train_targets = torch.from_numpy(train_labels_scaled.reshape(-1)).to(device)
+        from evaluate_methods import train_torch_model  # type: ignore
 
-    elif method.kind == "simple_lstm":
+        train_torch_model(model, train_inputs, train_targets, epochs, lr, weight_decay, desc=desc)
+        return model
+    if method.kind == "simple_lstm":
+        model = SimpleLSTMModel(hidden_dim=int(method.kwargs.get("hidden_dim", 16))).to(device)
         train_inputs = torch.from_numpy(train_seq[:, :, -1:].copy()).to(device)
         train_targets = torch.from_numpy(train_labels_scaled.reshape(-1)).to(device)
-        test_inputs = torch.from_numpy(test_seq[:, :, -1:].copy()).to(device)
+        from evaluate_methods import train_torch_model  # type: ignore
 
-        model = SimpleLSTMModel(hidden_dim=int(method.kwargs.get("hidden_dim", 16))).to(device)
-        train_torch_model(
-            model,
-            train_inputs,
-            train_targets,
-            epochs=epochs,
-            lr=lr,
-            weight_decay=weight_decay,
-            desc=desc_prefix,
-        )
-        model.eval()
-        with torch.no_grad():
-            preds_scaled = model(test_inputs).cpu().numpy()
-
-    elif method.kind == "regression":
+        train_torch_model(model, train_inputs, train_targets, epochs, lr, weight_decay, desc=desc)
+        return model
+    if method.kind == "regression":
         reg = RandomForestRegressor(**method.kwargs)
         X_train = train_seq.reshape(train_seq.shape[0], -1)
         y_train = train_labels_scaled.reshape(train_labels_scaled.shape[0], -1)
         reg.fit(X_train, y_train)
+        return reg
+    raise ValueError(f"Unsupported method kind {method.kind}")
+
+
+def predict_model(method: MethodConfig, model, test_seq: np.ndarray) -> np.ndarray:
+    device = torch.device("cpu")
+    if method.kind == "pew":
+        with torch.no_grad():
+            preds = model(torch.from_numpy(test_seq).to(device)).cpu().numpy()
+        return preds.reshape(-1)
+    if method.kind == "simple_lstm":
+        with torch.no_grad():
+            preds = model(torch.from_numpy(test_seq[:, :, -1:].copy()).to(device)).cpu().numpy()
+        return preds.reshape(-1)
+    if method.kind == "regression":
         X_test = test_seq.reshape(test_seq.shape[0], -1)
-        preds_scaled = reg.predict(X_test).reshape(-1)
-
-    else:
-        raise ValueError(f"Unsupported method kind {method.kind}")
-
-    preds_actual = count_scaler.inverse_transform(preds_scaled.reshape(-1, 1)).reshape(-1)
-    return preds_actual, preds_actual  # second value unused (placeholder for compatibility)
+        preds = model.predict(X_test)
+        return preds.reshape(-1)
+    raise ValueError(f"Unsupported method kind {method.kind}")
 
 
 def evaluate_methods_timeseries(
     methods: List[MethodConfig],
     horizons: Iterable[int],
     train_ratio: float,
+    test_ratio: float,
     folds: int,
-    fold_size: int | None,
+    fold_size: Optional[int],
     epochs: int,
     lr: float,
     weight_decay: float,
@@ -182,16 +204,8 @@ def evaluate_methods_timeseries(
         for method in methods:
             for horizon in horizons_list:
                 per_lot_metrics: Dict[str, Dict[str, float]] = {}
-                metric_accumulator: Dict[str, List[float]] = {}
-
                 lot_bar = (
-                    tqdm(
-                        total=len(PARK_TABLE_IDS),
-                        desc=f"{method.name} h{horizon}",
-                        leave=False,
-                        unit="lot",
-                        dynamic_ncols=True,
-                    )
+                    tqdm(total=len(PARK_TABLE_IDS), desc=f"{method.name} h{horizon}", leave=False, unit="lot", dynamic_ncols=True)
                     if tqdm
                     else None
                 )
@@ -204,82 +218,73 @@ def evaluate_methods_timeseries(
                             print(f"[WARN] {method.name} {lot_id} h{horizon}: {exc}")
                             continue
 
-                        fold_boundaries = generate_fold_boundaries(
-                            sequences.shape[0], train_ratio=train_ratio, folds=folds, fold_size=fold_size
-                        )
-                        if not fold_boundaries:
-                            print(f"[WARN] {method.name} {lot_id} h{horizon}: insufficient data for folds")
+                        total_days = sequences.shape[0]
+                        test_days = select_even_days(total_days, test_ratio)
+                        train_days = np.setdiff1d(np.arange(total_days), test_days)
+                        if train_days.size == 0 or test_days.size == 0:
+                            print(f"[WARN] {method.name} {lot_id} h{horizon}: insufficient data after split")
                             continue
 
-                        fold_preds: List[np.ndarray] = []
-                        fold_actuals: List[np.ndarray] = []
+                        train_seq_data = sequences[train_days]
+                        train_labels_data = labels_scaled[train_days]
+                        test_seq_data = sequences[test_days]
+                        test_labels_scaled = labels_scaled[test_days].reshape(-1)
+                        test_labels_actual = labels_actual[test_days].reshape(-1)
 
-                        fold_bar = (
-                            tqdm(
+                        fold_boundaries = generate_fold_boundaries(
+                            train_seq_data.shape[0],
+                            train_ratio=train_ratio,
+                            folds=folds,
+                            fold_size=fold_size,
+                        )
+                        if fold_boundaries and tqdm:
+                            fold_bar = tqdm(
                                 total=len(fold_boundaries),
                                 desc=f"{method.name} h{horizon} {lot_id}",
                                 leave=False,
                                 unit="fold",
                                 dynamic_ncols=True,
                             )
-                            if tqdm
-                            else None
-                        )
+                        else:
+                            fold_bar = None
 
                         for fold_idx, (test_start, test_end) in enumerate(fold_boundaries, start=1):
-                            train_seq = sequences[:test_start]
-                            train_labels_scaled = labels_scaled[:test_start]
-                            test_seq = sequences[test_start:test_end]
-                            test_labels_actual = labels_actual[test_start:test_end]
-
-                            if train_seq.shape[0] == 0 or test_seq.shape[0] == 0:
+                            fold_train_seq = train_seq_data[:test_start]
+                            fold_train_labels = train_labels_data[:test_start]
+                            fold_test_seq = train_seq_data[test_start:test_end]
+                            if fold_train_seq.shape[0] == 0 or fold_test_seq.shape[0] == 0:
                                 continue
-
-                            if method.kind == "regression":
-                                preds_actual, _ = train_and_predict(
-                                    method,
-                                    train_seq,
-                                    train_labels_scaled,
-                                    test_seq,
-                                    count_scaler,
-                                    epochs,
-                                    lr,
-                                    weight_decay,
-                                    desc_prefix="",
-                                )
-                            else:
-                                desc = f"{method.name} h{horizon} {lot_id} fold{fold_idx}"
-                                preds_actual, _ = train_and_predict(
-                                    method,
-                                    train_seq,
-                                    train_labels_scaled,
-                                    test_seq,
-                                    count_scaler,
-                                    epochs,
-                                    lr,
-                                    weight_decay,
-                                    desc_prefix=desc,
-                                )
-
-                            actual_flat = test_labels_actual.reshape(-1)
-                            fold_preds.append(preds_actual.reshape(-1))
-                            fold_actuals.append(actual_flat)
-
+                            desc = f"{method.name} h{horizon} {lot_id} fold{fold_idx}"
+                            fold_model = train_model(
+                                method,
+                                fold_train_seq,
+                                fold_train_labels,
+                                epochs,
+                                lr,
+                                weight_decay,
+                                desc,
+                            )
+                            predict_model(method, fold_model, fold_test_seq)
                             if fold_bar is not None:
                                 fold_bar.update(1)
-
                         if fold_bar is not None:
                             fold_bar.close()
 
-                        if not fold_preds:
-                            continue
-
-                        preds_concat = np.concatenate(fold_preds)
-                        actual_concat = np.concatenate(fold_actuals)
-                        lot_metrics = compute_metrics(actual_concat, preds_concat)
+                        full_model = train_model(
+                            method,
+                            train_seq_data,
+                            train_labels_data,
+                            epochs,
+                            lr,
+                            weight_decay,
+                            desc=f"{method.name} h{horizon} {lot_id} full",
+                        )
+                        preds_norm = predict_model(method, full_model, test_seq_data)
+                        accuracy = normalized_accuracy(test_labels_scaled, preds_norm)
+                        preds_actual = count_scaler.inverse_transform(preds_norm.reshape(-1, 1)).reshape(-1)
+                        actual_metrics = compute_actual_metrics(test_labels_actual.reshape(-1), preds_actual)
+                        lot_metrics = {"accuracy": accuracy, **actual_metrics}
                         per_lot_metrics[lot_id] = lot_metrics
-                        for key, value in lot_metrics.items():
-                            metric_accumulator.setdefault(key, []).append(float(value))
 
                         if lot_bar is not None:
                             lot_bar.update(1)
@@ -288,10 +293,14 @@ def evaluate_methods_timeseries(
                     if lot_bar is not None:
                         lot_bar.close()
 
-                if not metric_accumulator:
+                if not per_lot_metrics:
                     continue
 
-                aggregated = {key: float(np.mean(values)) for key, values in metric_accumulator.items()}
+                aggregated: Dict[str, float] = {}
+                keys = list(per_lot_metrics[next(iter(per_lot_metrics))].keys())
+                for key in keys:
+                    aggregated[key] = float(np.mean([metrics[key] for metrics in per_lot_metrics.values()]))
+
                 results.append(
                     {
                         "method": method.name,
@@ -314,7 +323,6 @@ def evaluate_methods_timeseries(
 def plot_grouped_bars(results: List[Dict[str, object]], output_path: str, methods: List[MethodConfig]) -> None:
     if not results:
         return
-
     horizons = sorted({int(r["horizon"]) for r in results})
     method_names = [m.name for m in methods if any(r["method"] == m.name for r in results)]
     if not method_names:
@@ -329,18 +337,18 @@ def plot_grouped_bars(results: List[Dict[str, object]], output_path: str, method
     x = np.arange(len(horizons))
     width = 0.8 / max(1, len(method_names))
 
-    import matplotlib.pyplot as plt
-
     plt.figure(figsize=(10, 6))
     for idx, name in enumerate(method_names):
         offsets = x + (idx - (len(method_names) - 1) / 2) * width
         plt.bar(offsets, acc_matrix[idx], width=width, label=name)
 
-    all_vals = acc_matrix.flatten()
-    if all_vals.size:
-        lower = all_vals.min()
-        margin = max(abs(lower), abs(lower)) * 0.1
-        plt.ylim(lower - margin, 100)
+    vals = acc_matrix.flatten()
+    if vals.size:
+        lower = vals.min()
+        margin = max(abs(lower), abs(vals.max())) * 0.1
+    else:
+        lower, margin = 0, 10
+    plt.ylim(lower - margin, 100)
 
     plt.xticks(x, [f"{h}h" for h in horizons])
     plt.xlabel("Forecast Horizon")
@@ -353,20 +361,17 @@ def plot_grouped_bars(results: List[Dict[str, object]], output_path: str, method
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Rolling and multi-fold evaluation for parking prediction models.")
+    parser = argparse.ArgumentParser(description="Rolling evaluation with reserved uniform test set.")
     parser.add_argument("--train-ratio", type=float, default=0.8)
-    parser.add_argument("--folds", type=int, default=3, help="Number of rolling folds.")
-    parser.add_argument("--fold-size", type=int, default=None, help="Days per fold (optional override).")
+    parser.add_argument("--test-ratio", type=float, default=0.2)
+    parser.add_argument("--folds", type=int, default=3)
+    parser.add_argument("--fold-size", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=80)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=str, default="results_timeseries")
-    parser.add_argument(
-        "--methods",
-        nargs="*",
-        help="Subset of methods to evaluate (e.g., 'PewLSTM', 'Simple LSTM'). Defaults to all.",
-    )
+    parser.add_argument("--methods", nargs="*", help="Subset of methods to evaluate")
     args = parser.parse_args()
 
     selected_methods = select_methods(args.methods)
@@ -374,13 +379,14 @@ def main() -> None:
         print("No methods selected for evaluation.")
         return
 
-    output_dir = os.path.join(os.path.dirname(__file__), args.output_dir)
+    output_dir = os.path.join(SCRIPT_DIR, args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
     results = evaluate_methods_timeseries(
         methods=selected_methods,
         horizons=[1, 2, 3],
         train_ratio=args.train_ratio,
+        test_ratio=args.test_ratio,
         folds=args.folds,
         fold_size=args.fold_size,
         epochs=args.epochs,
@@ -396,30 +402,43 @@ def main() -> None:
     plot_path = os.path.join(output_dir, "accuracy_comparison.png")
     plot_grouped_bars(results, plot_path, selected_methods)
 
-    sorted_records = sorted(results, key=lambda x: (x["method"], x["horizon"]))
+    unnorm_summary = []
     header = "Method\tHorizon\tAccuracy(%)\tRMSE\tMAE\tMAPE(%)"
     print(header)
     lines = [header]
-    for record in sorted_records:
+    for record in sorted(results, key=lambda x: (x["method"], x["horizon"])):
         metrics = record["metrics"]
         line = (
             f"{record['method']}\t{record['horizon']}\t"
-            f"{metrics['accuracy']:.2f}\t{metrics['rmse']:.4f}\t"
-            f"{metrics['mae']:.4f}\t{metrics['mape']:.2f}"
-        )
+            f"{metrics['accuracy']:.2f}\t{metrics['rmse']:.4f}\t{metrics['mae']:.4f}\t{metrics['mape']:.2f}"
+        ) 
         print(line)
         lines.append(line)
+        unnorm_entry = {
+            "method": record["method"],
+            "horizon": record["horizon"],
+            "metrics": {"accuracy_raw": metrics.get("accuracy_raw", float("nan"))},
+            "per_lot_metrics": {
+                lot: {"accuracy_raw": lot_metrics.get("accuracy_raw", float("nan"))}
+                for lot, lot_metrics in record["per_lot_metrics"].items()
+            },
+        }
+        unnorm_summary.append(unnorm_entry)
 
     text_path = os.path.join(output_dir, "metrics_summary.txt")
     with open(text_path, "w", encoding="utf-8") as txt:
         txt.write("\n".join(lines))
         txt.write("\n")
 
+    unnorm_path = os.path.join(output_dir, "accuracy_unnormalized_summary.json")
+    with open(unnorm_path, "w", encoding="utf-8") as fp:
+        json.dump(unnorm_summary, fp, indent=2)
+
     print(f"Saved summary JSON to {summary_path}")
     print(f"Saved metrics table to {text_path}")
     print(f"Saved plot to {plot_path}")
+    print(f"Saved unnormalized accuracy summary to {unnorm_path}")
 
 
 if __name__ == "__main__":
     main()
-
