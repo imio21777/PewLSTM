@@ -16,7 +16,8 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error
 from sklearn import preprocessing
 import csv
-from PewLSTM import pew_LSTM
+#from PewLSTM import pew_LSTM
+from modifiedPSTM import pew_LSTM
 
 HIDDEN_DIM = 1
 SEQ_SIZE = 24
@@ -558,12 +559,21 @@ def Pew_LSTM_Predict(x,y,s,pattern):
         print('accuracy: ' + str(round(accuracy[0],2))+"%"+' rmse: '+str(round(rmse,2)))
     return (pred_test,accuracy)
 
-k = 0
-print("Example: P"+str(k+1))
+# k = 0
+# print("Example: P"+str(k+1))
 
-print("pew depature 1h:")
-pattern = 0
-x, y, s= pGetAllData(k)
-x = x.astype('float32') 
-y = y.astype('float32') 
-ai = Pew_LSTM_Predict(x,y,s,pattern)
+# print("pew depature 1h:")
+# pattern = 0
+# x, y, s= pGetAllData(k)
+# x = x.astype('float32') 
+# y = y.astype('float32') 
+# ai = Pew_LSTM_Predict(x,y,s,pattern)
+
+for k in range(park_all_cnt):
+    print("Example: P"+str(k+1))
+    print("pew depature 1h:")
+    pattern = 0
+    x, y, s= pGetAllData(k)
+    x = x.astype('float32') 
+    y = y.astype('float32') 
+    ai = Pew_LSTM_Predict(x,y,s,pattern)
