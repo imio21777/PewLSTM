@@ -16,7 +16,7 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error
 from sklearn import preprocessing
 import csv
-#from PewLSTM import pew_LSTM
+# from PewLSTM import pew_LSTM
 from modifiedPSTM import pew_LSTM
 
 HIDDEN_DIM = 1

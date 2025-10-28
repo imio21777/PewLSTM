@@ -21,11 +21,20 @@ from sklearn import preprocessing
 import csv
 
 class pew_LSTM(nn.Module):
-    def __init__(self, input_size: int, hidden_size: int, weather_size: int):
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        weather_size: int,
+        use_periodic: bool = True,
+        use_weather: bool = True,
+    ):
         super(pew_LSTM, self).__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.weather_size = weather_size
+        self.use_periodic = use_periodic
+        self.use_weather = use_weather
 
         # input gate
         self.w_ix = Parameter(Tensor(hidden_size, input_size))
@@ -56,7 +65,7 @@ class pew_LSTM(nn.Module):
         self.w_m = Parameter(Tensor(hidden_size, input_size))
         self.w_t = Parameter(Tensor(hidden_size, hidden_size))
         self.w_e = Parameter(Tensor(hidden_size, weather_size))
-        self.b_e = Parameter(Tensor(hidden_size, 1)) # this vector in paper is "b_f"
+        self.b_e = Parameter(Tensor(hidden_size, 1))  # this vector in paper is "b_f"
 
         self.reset_weigths()
 
@@ -76,39 +85,45 @@ class pew_LSTM(nn.Module):
 
         batch_size, seq_size, input_dim = x_input.size()
 
-        h_output = torch.zeros(batch_size, seq_size, self.hidden_size)
-        c_output = torch.zeros(batch_size, seq_size, self.hidden_size)
+        device = x_input.device
+
+        h_output = torch.zeros(batch_size, seq_size, self.hidden_size, device=device)
+        c_output = torch.zeros(batch_size, seq_size, self.hidden_size, device=device)
 
         for b in range(batch_size):
-            h_t = torch.zeros(1, self.hidden_size).t()
-            c_t = torch.zeros(1, self.hidden_size).t()
+            h_t = torch.zeros(1, self.hidden_size, device=device).t()
+            c_t = torch.zeros(1, self.hidden_size, device=device).t()
 
-            for t in range(24):
+            for t in range(seq_size):
                 # day
-                if b < 1:
-                    h_d = torch.zeros(1, self.input_size).t()
+                if not self.use_periodic or b < 1:
+                    h_d = torch.zeros(1, self.input_size, device=device).t()
                 else:
                     h_d = x_input[b-1, t, :].unsqueeze(0).t()
                 
                 # week
-                if b < 7:
-                    h_w = torch.zeros(1, self.input_size).t()
+                if not self.use_periodic or b < 7:
+                    h_w = torch.zeros(1, self.input_size, device=device).t()
                 else:
                     h_w = x_input[b-7, t, :].unsqueeze(0).t()
 
                 # month
-                if b < 30:
-                    h_m = torch.zeros(1, self.input_size).t()
+                if not self.use_periodic or b < 30:
+                    h_m = torch.zeros(1, self.input_size, device=device).t()
                 else:
                     h_m = x_input[b-30, t, :].unsqueeze(0).t()
 
                 x = x_input[b, t, :].unsqueeze(0).t()  # [input_dim, 1]
-                weather_t = x_weather[b, t, :].unsqueeze(0).t()  # [weather_dim, 1]
+                if self.use_weather:
+                    weather_t = x_weather[b, t, :].unsqueeze(0).t()  # [weather_dim, 1]
+                else:
+                    weather_t = torch.zeros(self.weather_size, 1, device=device)
                 
                 #replace h_t with ho
-                h_o = torch.sigmoid(self.w_d @ h_d + self.w_w @ h_w + self.w_t @ h_t +
-                                    self.w_m @ h_m + self.w_t @ h_t)
-                e_t = torch.sigmoid(self.w_e @ weather_t + self.b_f)
+                h_o = torch.sigmoid(
+                    self.w_d @ h_d + self.w_w @ h_w + self.w_m @ h_m + self.w_t @ h_t + self.b_e
+                )
+                e_t = torch.sigmoid(self.w_e @ weather_t + self.b_e)
                 # input gate
                 i = torch.sigmoid(self.w_ix @ x + self.w_ih @ h_o +
                                     self.w_ie @ e_t + self.b_i)
