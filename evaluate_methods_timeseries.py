@@ -32,6 +32,7 @@ from evaluate_methods import (  # type: ignore
     load_series,
     select_methods,
     set_seed,
+    train_torch_model,
 )
 import run_modified_pewlstm as dataset_mod  # noqa: F401
 
@@ -40,6 +41,32 @@ dataset_mod.RECORD_PATH = os.path.join(data_root, "record")
 dataset_mod.WEATHER_PATH = os.path.join(data_root, "weather")
 
 torch.set_num_threads(max(1, os.cpu_count() // 2))
+
+CHECKPOINT_DIR = os.path.join(SCRIPT_DIR, "checkpoint")
+os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+
+
+def load_checkpoint(path: Optional[str]) -> Dict[str, Dict[str, Dict[str, Dict[str, float]]]]:
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            data = json.load(fp)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_checkpoint(path: Optional[str], data: Dict[str, Dict[str, Dict[str, Dict[str, float]]]]) -> None:
+    if not path:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as fp:
+        json.dump(data, fp, indent=2)
+    os.replace(tmp_path, path)
 
 
 def get_full_sequences(lot_index: int, horizon: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, MinMaxScaler]:
@@ -143,16 +170,12 @@ def train_model(
         ).to(device)
         train_inputs = torch.from_numpy(train_seq).to(device)
         train_targets = torch.from_numpy(train_labels_scaled.reshape(-1)).to(device)
-        from evaluate_methods import train_torch_model  # type: ignore
-
         train_torch_model(model, train_inputs, train_targets, epochs, lr, weight_decay, desc=desc)
         return model
     if method.kind == "simple_lstm":
         model = SimpleLSTMModel(hidden_dim=int(method.kwargs.get("hidden_dim", 16))).to(device)
         train_inputs = torch.from_numpy(train_seq[:, :, -1:].copy()).to(device)
         train_targets = torch.from_numpy(train_labels_scaled.reshape(-1)).to(device)
-        from evaluate_methods import train_torch_model  # type: ignore
-
         train_torch_model(model, train_inputs, train_targets, epochs, lr, weight_decay, desc=desc)
         return model
     if method.kind == "regression":
@@ -192,6 +215,9 @@ def evaluate_methods_timeseries(
     lr: float,
     weight_decay: float,
     seed: int,
+    checkpoint: Dict[str, Dict[str, Dict[str, Dict[str, float]]]],
+    checkpoint_path: Optional[str],
+    enable_fold_validation: bool,
 ) -> List[Dict[str, object]]:
     set_seed(seed)
     horizons_list = list(horizons)
@@ -210,6 +236,15 @@ def evaluate_methods_timeseries(
                     else None
                 )
 
+                method_store = checkpoint.setdefault(method.name, {})
+                horizon_key = str(horizon)
+                horizon_store = method_store.setdefault(horizon_key, {})
+                per_lot_metrics: Dict[str, Dict[str, float]] = {
+                    lot: {k: float(v) for k, v in metrics.items()}
+                    for lot, metrics in horizon_store.items()
+                    if isinstance(metrics, dict)
+                }
+
                 try:
                     for lot_index, lot_id in enumerate(PARK_TABLE_IDS):
                         try:
@@ -225,18 +260,33 @@ def evaluate_methods_timeseries(
                             print(f"[WARN] {method.name} {lot_id} h{horizon}: insufficient data after split")
                             continue
 
+                        stored_metrics = horizon_store.get(lot_id)
+                        needs_recompute = (
+                            stored_metrics is None
+                            or not isinstance(stored_metrics, dict)
+                            or "accuracy_raw" not in stored_metrics
+                            or "accuracy" not in stored_metrics
+                        )
+                        if not needs_recompute:
+                            per_lot_metrics[lot_id] = {k: float(v) for k, v in stored_metrics.items()}
+                            if lot_bar is not None:
+                                lot_bar.update(1)
+                            continue
+
                         train_seq_data = sequences[train_days]
                         train_labels_data = labels_scaled[train_days]
                         test_seq_data = sequences[test_days]
                         test_labels_scaled = labels_scaled[test_days].reshape(-1)
                         test_labels_actual = labels_actual[test_days].reshape(-1)
 
-                        fold_boundaries = generate_fold_boundaries(
-                            train_seq_data.shape[0],
-                            train_ratio=train_ratio,
-                            folds=folds,
-                            fold_size=fold_size,
-                        )
+                        fold_boundaries: List[Tuple[int, int]] = []
+                        if enable_fold_validation and folds != 0:
+                            fold_boundaries = generate_fold_boundaries(
+                                train_seq_data.shape[0],
+                                train_ratio=train_ratio,
+                                folds=folds,
+                                fold_size=fold_size,
+                            )
                         if fold_boundaries and tqdm:
                             fold_bar = tqdm(
                                 total=len(fold_boundaries),
@@ -284,7 +334,10 @@ def evaluate_methods_timeseries(
                         preds_actual = count_scaler.inverse_transform(preds_norm.reshape(-1, 1)).reshape(-1)
                         actual_metrics = compute_actual_metrics(test_labels_actual.reshape(-1), preds_actual)
                         lot_metrics = {"accuracy": accuracy, **actual_metrics}
-                        per_lot_metrics[lot_id] = lot_metrics
+                        lot_metrics_store = {k: float(v) for k, v in lot_metrics.items()}
+                        horizon_store[lot_id] = lot_metrics_store
+                        per_lot_metrics[lot_id] = lot_metrics_store
+                        save_checkpoint(checkpoint_path, checkpoint)
 
                         if lot_bar is not None:
                             lot_bar.update(1)
@@ -367,11 +420,13 @@ def main() -> None:
     parser.add_argument("--folds", type=int, default=3)
     parser.add_argument("--fold-size", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=80)
-    parser.add_argument("--", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=str, default="results_timeseries")
+    parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--methods", nargs="*", help="Subset of methods to evaluate")
+    parser.add_argument("--no-fold-validation", action="store_true", help="Disable fold-based validation")
     args = parser.parse_args()
 
     selected_methods = select_methods(args.methods)
@@ -382,17 +437,23 @@ def main() -> None:
     output_dir = os.path.join(SCRIPT_DIR, args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
+    checkpoint_path = args.checkpoint or os.path.join(CHECKPOINT_DIR, "timeseries_checkpoint.json")
+    checkpoint = load_checkpoint(checkpoint_path)
+
     results = evaluate_methods_timeseries(
         methods=selected_methods,
         horizons=[1, 2, 3],
         train_ratio=args.train_ratio,
         test_ratio=args.test_ratio,
-        folds=args.folds,
+        folds=0 if args.no_fold_validation else args.folds,
         fold_size=args.fold_size,
         epochs=args.epochs,
         lr=args.lr,
         weight_decay=args.weight_decay,
         seed=args.seed,
+        checkpoint=checkpoint,
+        checkpoint_path=checkpoint_path,
+        enable_fold_validation=not args.no_fold_validation,
     )
 
     summary_path = os.path.join(output_dir, "accuracy_summary.json")
@@ -403,15 +464,16 @@ def main() -> None:
     plot_grouped_bars(results, plot_path, selected_methods)
 
     unnorm_summary = []
-    header = "Method\tHorizon\tAccuracy(%)\tRMSE\tMAE\tMAPE(%)"
+    header = "Method\tHorizon\tAccuracy(%)\tAccuracy_raw(%)\tRMSE\tMAE\tMAPE(%)"
     print(header)
     lines = [header]
     for record in sorted(results, key=lambda x: (x["method"], x["horizon"])):
         metrics = record["metrics"]
         line = (
             f"{record['method']}\t{record['horizon']}\t"
-            f"{metrics['accuracy']:.2f}\t{metrics['rmse']:.4f}\t{metrics['mae']:.4f}\t{metrics['mape']:.2f}"
-        ) 
+            f"{metrics['accuracy']:.2f}\t{metrics.get('accuracy_raw', float('nan')):.2f}\t"
+            f"{metrics['rmse']:.4f}\t{metrics['mae']:.4f}\t{metrics['mape']:.2f}"
+        )
         print(line)
         lines.append(line)
         unnorm_entry = {
