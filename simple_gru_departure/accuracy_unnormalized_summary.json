@@ -1,0 +1,119 @@
+[
+  {
+    "method": "Simple GRU (departure)",
+    "horizon": 1,
+    "metrics": {
+      "accuracy_raw": 36.435849101185255
+    },
+    "per_lot_metrics": {
+      "P1": {
+        "accuracy_raw": 43.52656935292985
+      },
+      "P2": {
+        "accuracy_raw": 38.507168392457615
+      },
+      "P3": {
+        "accuracy_raw": 43.47371681017111
+      },
+      "P4": {
+        "accuracy_raw": 3.4760364496091767
+      },
+      "P5": {
+        "accuracy_raw": 37.89876225006865
+      },
+      "P6": {
+        "accuracy_raw": 46.528457881326126
+      },
+      "P7": {
+        "accuracy_raw": 26.093925924980855
+      },
+      "P8": {
+        "accuracy_raw": 50.61613864623883
+      },
+      "P9": {
+        "accuracy_raw": 40.04453054543923
+      },
+      "P10": {
+        "accuracy_raw": 34.19318475863109
+      }
+    }
+  },
+  {
+    "method": "Simple GRU (departure)",
+    "horizon": 2,
+    "metrics": {
+      "accuracy_raw": 14.287834508126085
+    },
+    "per_lot_metrics": {
+      "P1": {
+        "accuracy_raw": 30.882435856530265
+      },
+      "P2": {
+        "accuracy_raw": 13.717401343019342
+      },
+      "P3": {
+        "accuracy_raw": 17.446908331884526
+      },
+      "P4": {
+        "accuracy_raw": 3.0225246900296376
+      },
+      "P5": {
+        "accuracy_raw": 25.33990391875145
+      },
+      "P6": {
+        "accuracy_raw": 17.322458191896374
+      },
+      "P7": {
+        "accuracy_raw": -12.779975084328509
+      },
+      "P8": {
+        "accuracy_raw": 24.801027671526754
+      },
+      "P9": {
+        "accuracy_raw": 13.01512267998901
+      },
+      "P10": {
+        "accuracy_raw": 10.110537481962023
+      }
+    }
+  },
+  {
+    "method": "Simple GRU (departure)",
+    "horizon": 3,
+    "metrics": {
+      "accuracy_raw": 0.38748095116607767
+    },
+    "per_lot_metrics": {
+      "P1": {
+        "accuracy_raw": 30.764843577083635
+      },
+      "P2": {
+        "accuracy_raw": -8.633699705724585
+      },
+      "P3": {
+        "accuracy_raw": 16.884086930081033
+      },
+      "P4": {
+        "accuracy_raw": -19.43356883962071
+      },
+      "P5": {
+        "accuracy_raw": 23.50597665519255
+      },
+      "P6": {
+        "accuracy_raw": 5.901258298492618
+      },
+      "P7": {
+        "accuracy_raw": -50.115220103761835
+      },
+      "P8": {
+        "accuracy_raw": 0.5330174300259394
+      },
+      "P9": {
+        "accuracy_raw": 0.9447032438223424
+      },
+      "P10": {
+        "accuracy_raw": 3.523412026069783
+      }
+    }
+  }
+]

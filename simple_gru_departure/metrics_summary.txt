@@ -1,0 +1,4 @@
+Method	Horizon	Accuracy(%)	Accuracy_raw(%)	RMSE	MAE	MAPE(%)
+Simple GRU (departure)	1	64.30	36.44	2.6375	1.5923	29096.80
+Simple GRU (departure)	2	56.58	14.29	3.1275	2.0324	44107.85
+Simple GRU (departure)	3	54.30	0.39	3.4448	2.2435	56102.11
