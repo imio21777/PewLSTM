@@ -69,8 +69,12 @@ def save_checkpoint(path: Optional[str], data: Dict[str, Dict[str, Dict[str, Dic
     os.replace(tmp_path, path)
 
 
-def get_full_sequences(lot_index: int, horizon: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, MinMaxScaler]:
-    raw_series = load_series(lot_index)
+def get_full_sequences(
+    lot_index: int,
+    horizon: int,
+    target: str = "occupancy",
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, MinMaxScaler]:
+    raw_series = load_series(lot_index, target)
     feature_scaler = MinMaxScaler()
     scaled_series = feature_scaler.fit_transform(raw_series)
 
@@ -104,12 +108,39 @@ def select_even_days(total_days: int, ratio: float) -> np.ndarray:
 def normalized_accuracy(targets: np.ndarray, preds: np.ndarray) -> float:
     if targets.size == 0 or preds.size == 0:
         return 0.0
-    if targets.size > 1 and preds.size > 1:
-        mae = float(np.mean(np.abs(targets[:-1] - preds[1:])))
+
+    targets_flat = targets.reshape(-1)
+    preds_flat = preds.reshape(-1)
+
+    if targets_flat.size > 1 and preds_flat.size > 1:
+        diffs = np.abs(targets_flat[:-1] - preds_flat[1:])
+        mae = float(np.mean(diffs))
+        error_sum = 0.0
+        count = 0
+        for idx in range(targets_flat.size - 1):
+            target_val = targets_flat[idx]
+            pred_val = preds_flat[idx + 1]
+            count += 1
+            if target_val != 0:
+                error_sum += abs(target_val - pred_val) / target_val
+            else:
+                error_sum += abs(target_val - pred_val)
+        acc_term = error_sum / count if count else 0.0
     else:
-        mae = float(np.mean(np.abs(targets - preds)))
-    accuracy = (1.0 - mae) * 100.0
-    return float(np.clip(accuracy, -100.0, 100.0))
+        diffs = np.abs(targets_flat - preds_flat)
+        mae = float(np.mean(diffs)) if diffs.size else 0.0
+        if targets_flat.size and preds_flat.size:
+            base_target = targets_flat[0]
+            base_pred = preds_flat[0]
+            if base_target != 0:
+                acc_term = abs(base_target - base_pred) / base_target
+            else:
+                acc_term = abs(base_target - base_pred)
+        else:
+            acc_term = 1.0
+
+    accuracy = (1.0 - acc_term) * 100.0
+    return float(accuracy)
 
 
 def compute_actual_metrics(actual: np.ndarray, preds: np.ndarray) -> Dict[str, float]:
@@ -124,8 +155,21 @@ def compute_actual_metrics(actual: np.ndarray, preds: np.ndarray) -> Dict[str, f
     mae = float(np.mean(np.abs(diff)))
     denom = np.where(np.abs(actual_main) < 1e-3, 1e-3, np.abs(actual_main))
     mape = float(np.mean(np.abs(diff) / denom) * 100.0)
-    acc_raw = (1.0 - float(np.mean(np.abs(diff) / denom))) * 100.0
-    acc_raw = float(np.clip(acc_raw, -100.0, 100.0))
+    acc_raw = 0.0
+    if actual_main.size > 0 and preds_main.size > 0:
+        if actual_main.size > 0:
+            error_sum = 0.0
+            count = 0
+            for target_val, pred_val in zip(actual_main, preds_main):
+                count += 1
+                if target_val != 0:
+                    error_sum += abs(target_val - pred_val) / abs(target_val)
+                else:
+                    error_sum += abs(target_val - pred_val)
+            mean_error = error_sum / count if count else 0.0
+        else:
+            mean_error = 0.0
+        acc_raw = (1.0 - mean_error) * 100.0
     return {"rmse": rmse, "mae": mae, "mape": mape, "accuracy_raw": acc_raw}
 
 

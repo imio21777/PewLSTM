@@ -1,0 +1,4 @@
+Method	Horizon	Accuracy(%)	Accuracy_raw(%)	RMSE	MAE	MAPE(%)
+PewGRU (occupancy)	1	69.77	44.73	3.8984	2.3446	25686.51
+PewGRU (occupancy)	2	55.69	12.76	5.4585	3.6097	44100.60
+PewGRU (occupancy)	3	39.97	-26.08	7.1941	4.8879	67828.80

@@ -8,6 +8,7 @@ import json
 import math
 import os
 import random
+import time
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -83,11 +84,43 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
 
 
-def load_series(lot_index: int) -> np.ndarray:
-    """Load merged weather and parking series for a given lot."""
+COUNT_TARGETS = ("occupancy", "departure", "arrival")
+
+
+def _build_count_dict(park_book, target: str) -> Dict[int, Dict[str, int]]:
+    if target == "occupancy":
+        return trans_record_to_count(park_book)
+
+    p_dict: Dict[int, Dict[str, int]] = {}
+    for stime, etime in zip(park_book["Lockdown Time"], park_book["Lockup Time"]):
+        start_tsp = int(time.mktime(time.strptime(stime, "%Y/%m/%d %H:%M")))
+        end_tsp = int(time.mktime(time.strptime(etime, "%Y/%m/%d %H:%M")))
+        if end_tsp - start_tsp <= 5 * 60:
+            continue
+        if target == "departure":
+            hour_key = int(end_tsp // (60 * 60))
+        elif target == "arrival":
+            hour_key = int(start_tsp // (60 * 60))
+        else:
+            raise ValueError(f"Unsupported target type '{target}'")
+        entry = p_dict.setdefault(hour_key, {"cnt": 0})
+        entry["cnt"] += 1
+    return p_dict
+
+
+def load_series(lot_index: int, target: str = "occupancy") -> np.ndarray:
+    """Load merged weather and parking series for a given lot.
+
+    Args:
+        lot_index: Parking lot index.
+        target: One of 'occupancy', 'departure', or 'arrival'.
+    """
+    if target not in COUNT_TARGETS:
+        raise ValueError(f"Unknown target '{target}'. Expected one of {COUNT_TARGETS}")
+
     park_book = read_park_table(lot_index)
     weather_book = read_weather_table(PARK_WEATHER_IDX[lot_index])
-    p_dict = trans_record_to_count(park_book)
+    p_dict = _build_count_dict(park_book, target)
     if not p_dict:
         raise ValueError(f"No parking records for {PARK_TABLE_IDS[lot_index]}")
     start_h = min(p_dict.keys())
@@ -105,12 +138,12 @@ def load_series(lot_index: int) -> np.ndarray:
 
 
 def prepare_sequences(
-    lot_index: int, horizon: int, train_ratio: float
+    lot_index: int, horizon: int, train_ratio: float, target: str = "occupancy"
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, MinMaxScaler]:
     if horizon < 1:
         raise ValueError("Horizon must be >= 1")
 
-    raw_series = load_series(lot_index)
+    raw_series = load_series(lot_index, target)
     feature_scaler = MinMaxScaler()
     scaled_series = feature_scaler.fit_transform(raw_series)
 
@@ -240,9 +273,26 @@ def compute_metrics(actual: np.ndarray, predicted: np.ndarray) -> Dict[str, floa
     mae = float(np.mean(np.abs(diff)))
     denom = np.where(np.abs(actual) < 1e-3, 1e-3, np.abs(actual))
     mape = float(np.mean(np.abs(diff) / denom) * 100.0)
-    sample_acc = 1.0 - np.abs(diff) / denom
-    sample_acc = np.clip(sample_acc, -1.0, 1.0)
-    accuracy = float(np.mean(sample_acc) * 100.0)
+    accuracy = 0.0
+    if actual.size > 0 and predicted.size > 0:
+        if actual.size > 1 and predicted.size > 1:
+            error_sum = 0.0
+            count = 0
+            for target_val, pred_val in zip(actual[:-1], predicted[1:]):
+                count += 1
+                if target_val != 0:
+                    error_sum += abs(target_val - pred_val) / abs(target_val)
+                else:
+                    error_sum += abs(target_val - pred_val)
+            mean_error = error_sum / count if count else 0.0
+        else:
+            target_val = actual[0]
+            pred_val = predicted[0]
+            if target_val != 0:
+                mean_error = abs(target_val - pred_val) / abs(target_val)
+            else:
+                mean_error = abs(target_val - pred_val)
+        accuracy = (1.0 - mean_error) * 100.0
     return {
         "accuracy": accuracy,
         "rmse": rmse,

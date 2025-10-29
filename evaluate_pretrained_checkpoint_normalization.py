@@ -10,6 +10,7 @@ from typing import Dict
 
 import numpy as np
 import torch
+import math
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 RESULTS_DIR = SCRIPT_DIR / "results"
@@ -24,7 +25,6 @@ sys.path.append(str(SCRIPT_DIR))
 from evaluate_methods_timeseries import get_full_sequences  # type: ignore
 from evaluate_methods import set_seed  # type: ignore
 from modifiedPSTM import pew_LSTM  # type: ignore
-
 
 class CheckpointModel(torch.nn.Module):
     def __init__(self) -> None:
@@ -53,7 +53,7 @@ def evaluate_normalized(test_ratio: float, seed: int) -> Dict[str, float]:
     lot_index = 0
     horizon = 1
 
-    sequences, labels_scaled, _, _ = get_full_sequences(lot_index, horizon)
+    sequences, labels_scaled, labels_actual, count_scaler = get_full_sequences(lot_index, horizon)
     num_days = sequences.shape[0]
     test_days = select_even_days(num_days, test_ratio)
     train_days = np.setdiff1d(np.arange(num_days), test_days)
@@ -61,7 +61,8 @@ def evaluate_normalized(test_ratio: float, seed: int) -> Dict[str, float]:
     train_seq = sequences[train_days]
     train_labels = labels_scaled[train_days]
     test_seq = sequences[test_days]
-    test_labels = labels_scaled[test_days]
+    test_labels_scaled = labels_scaled[test_days]
+    test_labels_actual = labels_actual[test_days]
 
     model = CheckpointModel()
     state_dict = torch.load(CKPT_PATH, map_location="cpu", weights_only=True)
@@ -71,17 +72,53 @@ def evaluate_normalized(test_ratio: float, seed: int) -> Dict[str, float]:
     with torch.no_grad():
         preds = model(torch.from_numpy(test_seq))
 
-    preds_np = preds.numpy()
-    targets_np = test_labels.reshape(-1)
-    preds_np = preds_np.reshape(-1)
+    preds_np = preds.numpy().reshape(-1)
+    targets_scaled_np = test_labels_scaled.reshape(-1)
+    targets_actual_np = test_labels_actual.reshape(-1)
 
-    if preds_np.size > 1 and targets_np.size > 1:
-        diff = np.abs(targets_np[:-1] - preds_np[1:])
-        mae = float(np.mean(diff))
+    preds_actual_np = count_scaler.inverse_transform(preds_np.reshape(-1, 1)).reshape(-1)
+
+    if preds_actual_np.size > 1 and preds_np.size > 1:
+        diffs = np.abs(targets_scaled_np[:-1] - preds_np[1:])
+        mae = float(np.mean(diffs))
+        p = 0.0
+        k = 0
+        sq_err = 0.0
+        for idx in range(targets_actual_np.size - 1):
+            target_val = targets_actual_np[idx]
+            pred_val = preds_actual_np[idx + 1]
+            k += 1
+            if target_val != 0:
+                p += abs(target_val - pred_val) / target_val
+            else:
+                p += abs(target_val - pred_val)
+            sq_err += float((target_val - pred_val) ** 2)
+        acc_term = p / k if k else 0.0
+        accuracy = (1.0 - acc_term) * 100.0
+        rmse = math.sqrt(sq_err / k) if k else 0.0
+        actual_aligned = targets_actual_np[:-1]
+        preds_aligned = preds_actual_np[1:]
+        if actual_aligned.size:
+            denom = np.where(np.abs(actual_aligned) < 1e-3, 1e-3, np.abs(actual_aligned))
+            mape = float(np.mean(np.abs(preds_aligned - actual_aligned) / denom) * 100.0)
+        else:
+            mape = 0.0
     else:
-        mae = float(np.mean(np.abs(targets_np - preds_np)))
-    accuracy = (1 - mae) * 100.0
-    return {"accuracy": accuracy, "mae": mae}
+        diffs = np.abs(targets_scaled_np - preds_np)
+        mae = float(np.mean(diffs)) if diffs.size else 0.0
+        if targets_actual_np.size and preds_actual_np.size:
+            if targets_actual_np[0] != 0:
+                accuracy = (1.0 - abs(targets_actual_np[0] - preds_actual_np[0]) / targets_actual_np[0]) * 100.0
+            else:
+                accuracy = (1.0 - abs(targets_actual_np[0] - preds_actual_np[0])) * 100.0
+            rmse = math.sqrt(float((targets_actual_np[0] - preds_actual_np[0]) ** 2))
+            denom = max(abs(targets_actual_np[0]), 1e-3)
+            mape = float(abs(preds_actual_np[0] - targets_actual_np[0]) / denom * 100.0)
+        else:
+            accuracy = 0.0
+            rmse = 0.0
+            mape = 0.0
+    return {"accuracy": accuracy, "mae": mae, "rmse": rmse, "mape": mape}
 
 
 def plot_bar(metrics: Dict[str, float]) -> None:
