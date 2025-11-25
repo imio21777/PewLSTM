@@ -572,7 +572,7 @@ def Pew_LSTM_Predict(x,y,s,pattern):
 for k in range(park_all_cnt):
     print("Example: P"+str(k+1))
     print("pew depature 1h:")
-    pattern = 0
+    pattern = 1
     x, y, s= pGetAllData(k)
     x = x.astype('float32') 
     y = y.astype('float32') 
