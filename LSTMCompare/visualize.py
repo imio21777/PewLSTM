@@ -291,6 +291,18 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     
+    # Get script directory
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Update CSV path: try CWD first, then script_dir
+    if not os.path.isabs(args.csv):
+        if not os.path.exists(args.csv) and os.path.exists(os.path.join(script_dir, args.csv)):
+            args.csv = os.path.join(script_dir, args.csv)
+        
+    # Update Output path: if just filename, save to script_dir
+    if not os.path.dirname(args.output):
+        args.output = os.path.join(script_dir, args.output)
+    
     # 加载数据
     df = load_results(args.csv)
     

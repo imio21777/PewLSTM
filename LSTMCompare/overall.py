@@ -12,7 +12,8 @@ import sys
 import os
 
 # 在导入main之前，先切换到父目录
-parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+script_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(script_dir)
 os.chdir(parent_dir)
 sys.path.insert(0, parent_dir)
 
@@ -147,11 +148,14 @@ class AblationPewLSTMModel(nn.Module):
 # ========== 训练函数 ==========
 
 def train_model(model, train_x, train_y, epochs=500, lr=1e-2,
-                model_name='model', version='v1', checkpoint_dir='./checkpoints',
+                model_name='model', version='v1', checkpoint_dir=None,
                 save_interval=50):
     """
     训练模型(带进度条和断点保存)
     """
+    if checkpoint_dir is None:
+        checkpoint_dir = './checkpoints'
+    
     os.makedirs(checkpoint_dir, exist_ok=True)
     
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -257,7 +261,7 @@ def evaluate_model(model, test_x, test_y, scaler, is_rf=False):
 
 def run_mini_experiments(park_indices=range(10), predict_hours=1,
                         task='departure', version='v1', epochs=500,
-                        use_pretrained_pewlstm=True):
+                        use_pretrained_pewlstm=True, output_dir='.'):
     """
     Mini实验: P1-P10, 1h, departure, 5种模型
     """
@@ -287,12 +291,21 @@ def run_mini_experiments(park_indices=range(10), predict_hours=1,
         if use_pretrained_pewlstm and predict_hours == 1 and task == 'departure':
             print(f"\n  [1/5] PewLSTM (using pretrained model)")
             pewlstm_model = PewLSTMModel()
-            pewlstm_model.load_state_dict(torch.load('model_P1_1h.pth'))
+            # Try to load from output_dir first, then current dir
+            model_path = os.path.join(output_dir, 'model_P1_1h.pth')
+            if not os.path.exists(model_path):
+                 model_path = 'model_P1_1h.pth'
+            
+            if os.path.exists(model_path):
+                pewlstm_model.load_state_dict(torch.load(model_path))
+            else:
+                print(f"  Warning: Pretrained model not found at {model_path}, initializing new.")
         else:
             print(f"\n  [1/5] PewLSTM (training)")
             pewlstm_model = PewLSTMModel()
             pewlstm_model = train_model(pewlstm_model, train_x, train_y, epochs=epochs,
-                                       model_name=f'PewLSTM_P{park_idx+1}', version=version)
+                                       model_name=f'PewLSTM_P{park_idx+1}', version=version,
+                                       checkpoint_dir=os.path.join(output_dir, 'checkpoints'))
         
         acc, rmse = evaluate_model(pewlstm_model, test_x, test_y, s)
         results.append({
@@ -309,7 +322,8 @@ def run_mini_experiments(park_indices=range(10), predict_hours=1,
         print(f"\n  [2/5] Simple LSTM (training)")
         simple_lstm = SimpleLSTMModel()
         simple_lstm = train_model(simple_lstm, train_x, train_y, epochs=epochs,
-                                  model_name=f'SimpleLSTM_P{park_idx+1}', version=version)
+                                  model_name=f'SimpleLSTM_P{park_idx+1}', version=version,
+                                  checkpoint_dir=os.path.join(output_dir, 'checkpoints'))
         
         acc, rmse = evaluate_model(simple_lstm, test_x, test_y, s)
         results.append({
@@ -342,7 +356,8 @@ def run_mini_experiments(park_indices=range(10), predict_hours=1,
         print(f"\n  [4/5] PewLSTM w/o Periodic (training)")
         pewlstm_no_periodic = AblationPewLSTMModel(use_periodic=False, use_weather=True)
         pewlstm_no_periodic = train_model(pewlstm_no_periodic, train_x, train_y, epochs=epochs,
-                                         model_name=f'PewLSTM_NoPeriodic_P{park_idx+1}', version=version)
+                                         model_name=f'PewLSTM_NoPeriodic_P{park_idx+1}', version=version,
+                                         checkpoint_dir=os.path.join(output_dir, 'checkpoints'))
         
         acc, rmse = evaluate_model(pewlstm_no_periodic, test_x, test_y, s)
         results.append({
@@ -359,7 +374,8 @@ def run_mini_experiments(park_indices=range(10), predict_hours=1,
         print(f"\n  [5/5] PewLSTM w/o Weather (training)")
         pewlstm_no_weather = AblationPewLSTMModel(use_periodic=True, use_weather=False)
         pewlstm_no_weather = train_model(pewlstm_no_weather, train_x, train_y, epochs=epochs,
-                                        model_name=f'PewLSTM_NoWeather_P{park_idx+1}', version=version)
+                                        model_name=f'PewLSTM_NoWeather_P{park_idx+1}', version=version,
+                                        checkpoint_dir=os.path.join(output_dir, 'checkpoints'))
         
         acc, rmse = evaluate_model(pewlstm_no_weather, test_x, test_y, s)
         results.append({
@@ -374,7 +390,7 @@ def run_mini_experiments(park_indices=range(10), predict_hours=1,
     
     # 保存结果
     df = pd.DataFrame(results)
-    result_path = f'results_{version}.csv'
+    result_path = os.path.join(output_dir, f'results_{version}.csv')
     df.to_csv(result_path, index=False)
     print(f"\n{'='*60}")
     print(f"  Results saved to: {result_path}")
@@ -388,7 +404,7 @@ def run_mini_experiments(park_indices=range(10), predict_hours=1,
 def run_full_experiments(park_indices=range(10),
                         predict_hours_list=[1, 2, 3],
                         tasks=['departure', 'arrival'],
-                        version='full_v1', epochs=500):
+                        version='full_v1', epochs=500, output_dir='.'):
     """完整实验"""
     all_results = []
     
@@ -404,13 +420,14 @@ def run_full_experiments(park_indices=range(10),
                 task=task,
                 version=f'{version}_{hours}h_{task}',
                 epochs=epochs,
-                use_pretrained_pewlstm=False
+                use_pretrained_pewlstm=False,
+                output_dir=output_dir
             )
             all_results.append(df)
     
     # 合并结果
     final_df = pd.concat(all_results, ignore_index=True)
-    final_path = f'results_{version}_complete.csv'
+    final_path = os.path.join(output_dir, f'results_{version}_complete.csv')
     final_df.to_csv(final_path, index=False)
     
     print(f"\n{'='*60}")
@@ -450,14 +467,16 @@ if __name__ == '__main__':
             task=args.task,
             version=args.version,
             epochs=args.epochs,
-            use_pretrained_pewlstm=not args.train_pew
+            use_pretrained_pewlstm=not args.train_pew,
+            output_dir=script_dir
         )
     elif args.full:
         print("Running FULL experiments...")
         run_full_experiments(
             park_indices=park_indices,
             version=args.version,
-            epochs=args.epochs
+            epochs=args.epochs,
+            output_dir=script_dir
         )
     else:
         print("Please specify --mini or --full")

@@ -289,6 +289,18 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     
+    # Get script directory
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Update CSV path: try CWD first, then script_dir
+    if not os.path.isabs(args.csv):
+        if not os.path.exists(args.csv) and os.path.exists(os.path.join(script_dir, args.csv)):
+            args.csv = os.path.join(script_dir, args.csv)
+        
+    # Update Output path: if just filename, save to script_dir
+    if not os.path.dirname(args.output):
+        args.output = os.path.join(script_dir, args.output)
+    
     # Load data
     df = load_results(args.csv)
     
@@ -303,10 +315,10 @@ if __name__ == '__main__':
     
     # Generate plots
     if args.summary:
-        plot_summary_table(df, save_path='summary_table.png')
+        plot_summary_table(df, save_path=args.output)
     
     if args.heatmap:
-        plot_heatmap(df, metric=args.metric, save_path='heatmap.png')
+        plot_heatmap(df, metric=args.metric, save_path=args.output)
     
     if args.multi:
         hours_list = ['1h', '2h', '3h'] if '2h' in df['Hours'].values else ['1h']

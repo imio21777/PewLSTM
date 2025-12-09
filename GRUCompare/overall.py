@@ -26,10 +26,11 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # 在导入main之前，先切换到父目录
-parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 在导入main之前，先切换到父目录
+script_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(script_dir)
 os.chdir(parent_dir)
 sys.path.insert(0, parent_dir)
-sys.path.insert(0, os.path.join(parent_dir, 'compare'))
 
 # Import models
 from modifiedPSTM import pew_LSTM
@@ -155,7 +156,7 @@ class PewLSTM_Model(nn.Module):
 
 
 def train_model(model, train_x, train_y, epochs=500, lr=1e-2, 
-                model_name='model', version='v1', checkpoint_dir='./checkpoints',
+                model_name='model', version='v1', checkpoint_dir=None,
                 save_interval=50):
     """
     Train model with progress bar and checkpoint saving
@@ -172,6 +173,9 @@ def train_model(model, train_x, train_y, epochs=500, lr=1e-2,
     Returns:
         trained model
     """
+    if checkpoint_dir is None:
+        checkpoint_dir = './checkpoints'
+    
     os.makedirs(checkpoint_dir, exist_ok=True)
     
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -274,7 +278,7 @@ def evaluate_model(model, test_x, test_y, scaler):
 
 def run_mini_experiments(park_indices=range(10), predict_hours=1, 
                         task='departure', version='v1', epochs=500,
-                        use_pretrained_pewlstm=True):
+                        use_pretrained_pewlstm=True, output_dir='.'):
     """
     Run mini experiments: P1-P10, 1h, departure only
     Args:
@@ -313,12 +317,21 @@ def run_mini_experiments(park_indices=range(10), predict_hours=1,
         if use_pretrained_pewlstm and predict_hours == 1 and park_idx in [0,1,2,3,4,5,6,7,8,9]:
             print(f"\n  [1/3] PewLSTM (using pretrained model)")
             pewlstm_model = PewLSTM_Model()
-            pewlstm_model.load_state_dict(torch.load('model_P1_1h.pth'))
+            # Try to load from output_dir first, then current dir
+            model_path = os.path.join(output_dir, 'model_P1_1h.pth')
+            if not os.path.exists(model_path):
+                 model_path = 'model_P1_1h.pth'
+            
+            if os.path.exists(model_path):
+                pewlstm_model.load_state_dict(torch.load(model_path))
+            else:
+                print(f"  Warning: Pretrained model not found at {model_path}, initializing new.")
         else:
             print(f"\n  [1/3] PewLSTM (training from scratch)")
             pewlstm_model = PewLSTM_Model()
             pewlstm_model = train_model(pewlstm_model, train_x, train_y, epochs=epochs,
-                                       model_name=f'PewLSTM_P{park_idx+1}', version=version)
+                                       model_name=f'PewLSTM_P{park_idx+1}', version=version,
+                                       checkpoint_dir=os.path.join(output_dir, 'checkpoints'))
         
         acc, rmse = evaluate_model(pewlstm_model, test_x, test_y, s)
         results.append({
@@ -335,7 +348,8 @@ def run_mini_experiments(park_indices=range(10), predict_hours=1,
         print(f"\n  [2/3] GRU (training)")
         gru_model = GRU_Model()
         gru_model = train_model(gru_model, train_x, train_y, epochs=epochs,
-                               model_name=f'GRU_P{park_idx+1}', version=version)
+                               model_name=f'GRU_P{park_idx+1}', version=version,
+                               checkpoint_dir=os.path.join(output_dir, 'checkpoints'))
         
         acc, rmse = evaluate_model(gru_model, test_x, test_y, s)
         results.append({
@@ -352,7 +366,8 @@ def run_mini_experiments(park_indices=range(10), predict_hours=1,
         print(f"\n  [3/3] PewGRU (training)")
         pewgru_model = PewGRU_Model()
         pewgru_model = train_model(pewgru_model, train_x, train_y, epochs=epochs,
-                                  model_name=f'PewGRU_P{park_idx+1}', version=version)
+                                  model_name=f'PewGRU_P{park_idx+1}', version=version,
+                                  checkpoint_dir=os.path.join(output_dir, 'checkpoints'))
         
         acc, rmse = evaluate_model(pewgru_model, test_x, test_y, s)
         results.append({
@@ -367,7 +382,7 @@ def run_mini_experiments(park_indices=range(10), predict_hours=1,
     
     # Save results
     df = pd.DataFrame(results)
-    result_path = f'results_{version}.csv'
+    result_path = os.path.join(output_dir, f'results_{version}.csv')
     df.to_csv(result_path, index=False)
     print(f"\n{'='*60}")
     print(f"  Results saved to: {result_path}")
@@ -379,7 +394,7 @@ def run_mini_experiments(park_indices=range(10), predict_hours=1,
 def run_full_experiments(park_indices=range(10), 
                         predict_hours_list=[1, 2, 3],
                         tasks=['departure', 'arrival'],
-                        version='full_v1', epochs=500):
+                        version='full_v1', epochs=500, output_dir='.'):
     """
     Run full experiments with all combinations
     """
@@ -397,13 +412,14 @@ def run_full_experiments(park_indices=range(10),
                 task=task,
                 version=f'{version}_{hours}h_{task}',
                 epochs=epochs,
-                use_pretrained_pewlstm=False
+                use_pretrained_pewlstm=False,
+                output_dir=output_dir
             )
             all_results.append(df)
     
     # Combine all results
     final_df = pd.concat(all_results, ignore_index=True)
-    final_path = f'results_{version}_complete.csv'
+    final_path = os.path.join(output_dir, f'results_{version}_complete.csv')
     final_df.to_csv(final_path, index=False)
     
     print(f"\n{'='*60}")
@@ -439,14 +455,16 @@ if __name__ == '__main__':
             predict_hours=args.hours,
             task=args.task,
             version=args.version,
-            epochs=args.epochs
+            epochs=args.epochs,
+            output_dir=script_dir
         )
     elif args.full:
         print("Running FULL experiments...")
         run_full_experiments(
             park_indices=park_indices,
             version=args.version,
-            epochs=args.epochs
+            epochs=args.epochs,
+            output_dir=script_dir
         )
     else:
         print("Please specify --mini or --full")
