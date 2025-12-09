@@ -1,4 +1,0 @@
-Method	Horizon	Accuracy(%)	Accuracy_raw(%)	RMSE	MAE	MAPE(%)
-Simple GRU (occupancy)	1	73.72	54.54	3.6954	2.1081	19706.16
-Simple GRU (occupancy)	2	58.71	19.09	5.1645	3.3726	40659.76
-Simple GRU (occupancy)	3	46.70	-11.28	6.3889	4.2879	59491.64

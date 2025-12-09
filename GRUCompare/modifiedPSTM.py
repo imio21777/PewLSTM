@@ -108,7 +108,7 @@ class pew_LSTM(nn.Module):
                 #replace h_t with ho
                 h_o = torch.sigmoid(self.w_d @ h_d + self.w_w @ h_w + self.w_t @ h_t +
                                     self.w_m @ h_m + self.w_t @ h_t)
-                e_t = torch.sigmoid(self.w_e @ weather_t + self.b_e)
+                e_t = torch.sigmoid(self.w_e @ weather_t + self.b_f)
                 # input gate
                 i = torch.sigmoid(self.w_ix @ x + self.w_ih @ h_o +
                                     self.w_ie @ e_t + self.b_i)

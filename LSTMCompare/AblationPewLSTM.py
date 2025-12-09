@@ -3,34 +3,22 @@ import torch.nn as nn
 from torch.nn import Parameter
 from torch.nn import init
 from torch import Tensor
-import xlrd
-import numpy as np
-from math import sqrt
-import pandas as pd
-import time
-import datetime
-import matplotlib.pyplot as plt
 import math
-import random as rd
-import calendar
-from torch.autograd import Variable
-from sklearn.preprocessing import minmax_scale 
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_squared_error
-from sklearn import preprocessing
-import csv
 
-class pew_LSTM(nn.Module):
-    def __init__(self, input_size: int, hidden_size: int, weather_size: int):
-        super(pew_LSTM, self).__init__()
+class AblationPewLSTM(nn.Module):
+    def __init__(self, input_size: int, hidden_size: int, weather_size: int, 
+                 use_periodic=True, use_weather=True):
+        super(AblationPewLSTM, self).__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.weather_size = weather_size
+        self.use_periodic = use_periodic
+        self.use_weather = use_weather
 
         # input gate
         self.w_ix = Parameter(Tensor(hidden_size, input_size))
         self.w_ih = Parameter(Tensor(hidden_size, hidden_size))
-        self.w_ie = Parameter(Tensor(hidden_size, hidden_size))  # this vector in paper is "w_fe"
+        self.w_ie = Parameter(Tensor(hidden_size, hidden_size))
         self.b_i = Parameter(Tensor(hidden_size, 1))
 
         # forget gate
@@ -56,13 +44,11 @@ class pew_LSTM(nn.Module):
         self.w_m = Parameter(Tensor(hidden_size, input_size))
         self.w_t = Parameter(Tensor(hidden_size, hidden_size))
         self.w_e = Parameter(Tensor(hidden_size, weather_size))
-        self.b_e = Parameter(Tensor(hidden_size, 1)) # this vector in paper is "b_f"
+        self.b_e = Parameter(Tensor(hidden_size, 1))
 
         self.reset_weigths()
 
     def reset_weigths(self):
-        """reset weights
-        """
         stdv = 1.0 / math.sqrt(self.hidden_size)
         for weight in self.parameters():
             init.uniform_(weight, -stdv, stdv)
@@ -84,31 +70,50 @@ class pew_LSTM(nn.Module):
             c_t = torch.zeros(1, self.hidden_size).t()
 
             for t in range(24):
-                # day
-                if b < 1:
-                    h_d = torch.zeros(1, self.input_size).t()
-                else:
-                    h_d = x_input[b-1, t, :].unsqueeze(0).t()
-                
-                # week
-                if b < 7:
-                    h_w = torch.zeros(1, self.input_size).t()
-                else:
-                    h_w = x_input[b-7, t, :].unsqueeze(0).t()
+                # Periodic features
+                if self.use_periodic:
+                    # day
+                    if b < 1:
+                        h_d = torch.zeros(1, self.input_size).t()
+                    else:
+                        h_d = x_input[b-1, t, :].unsqueeze(0).t()
+                    
+                    # week
+                    if b < 7:
+                        h_w = torch.zeros(1, self.input_size).t()
+                    else:
+                        h_w = x_input[b-7, t, :].unsqueeze(0).t()
 
-                # month
-                if b < 30:
-                    h_m = torch.zeros(1, self.input_size).t()
+                    # month
+                    if b < 30:
+                        h_m = torch.zeros(1, self.input_size).t()
+                    else:
+                        h_m = x_input[b-30, t, :].unsqueeze(0).t()
                 else:
-                    h_m = x_input[b-30, t, :].unsqueeze(0).t()
+                    # Zero out periodic features if disabled
+                    h_d = torch.zeros(1, self.input_size).t()
+                    h_w = torch.zeros(1, self.input_size).t()
+                    h_m = torch.zeros(1, self.input_size).t()
 
                 x = x_input[b, t, :].unsqueeze(0).t()  # [input_dim, 1]
-                weather_t = x_weather[b, t, :].unsqueeze(0).t()  # [weather_dim, 1]
                 
-                #replace h_t with ho
+                if self.use_weather:
+                    weather_t = x_weather[b, t, :].unsqueeze(0).t()  # [weather_dim, 1]
+                else:
+                    weather_t = torch.zeros(self.weather_size, 1)
+
+                # replace h_t with ho
+                # Note: w_t is used twice in original code? "self.w_t @ h_t + self.w_m @ h_m + self.w_t @ h_t"
+                # I will keep it as is to match original implementation exactly, assuming it was intentional or a bug I should preserve for "ablation" of *features* not *bugs*.
                 h_o = torch.sigmoid(self.w_d @ h_d + self.w_w @ h_w + self.w_t @ h_t +
                                     self.w_m @ h_m + self.w_t @ h_t)
-                e_t = torch.sigmoid(self.w_e @ weather_t + self.b_e)
+                
+                # Weather gate
+                if self.use_weather:
+                    e_t = torch.sigmoid(self.w_e @ weather_t + self.b_e)
+                else:
+                    e_t = torch.zeros(self.hidden_size, 1)
+
                 # input gate
                 i = torch.sigmoid(self.w_ix @ x + self.w_ih @ h_o +
                                     self.w_ie @ e_t + self.b_i)
